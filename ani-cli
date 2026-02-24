@@ -47,7 +47,9 @@ help_info() {
 
     Options:
       -c, --continue
-        Continue watching from history
+        Watch the next episode of the previously played animes (e.g, history: episode 2, -c => episode 3)
+      -R, --replay,
+        Relaunch previously played episodes from the history list
       -d, --download
         Download the video instead of playing it
       -D, --delete
@@ -271,6 +273,13 @@ process_hist_entry() {
     [ -n "$ep_no" ] && printf "%s\t%s - episode %s\n" "$id" "$title" "$ep_no"
 }
 
+process_prev_entry(){
+    ep_list=$(episodes_list "$id")
+    latest_ep=$(printf "%s\n" "$ep_list" | tail -n1)
+    title=$(printf "%s\n" "$title" | sed "s|[0-9]\+ episodes|${latest_ep} episodes|")
+    [ -n "$ep_no" ] && printf "%s\t%s - episode %s\n" "$id" "$title" "$ep_no"
+}
+
 update_history() {
     if grep -q -- "$id" "$histfile"; then
         sed -E "s|^[^	]+	${id}	[^	]+$|${ep_no}	${id}	${title}|" "$histfile" >"${histfile}.new"
@@ -439,6 +448,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -c | --continue) search=history ;;
+        -R | --replay) search=prev ;;
         -d | --download)
             [ "$player_function" = "iSH" ] && iSH_DownFix="--async-dns=false"
             player_function=download
@@ -496,9 +506,14 @@ esac
 
 # searching
 case "$search" in
-    history)
-        anime_list=$(while read -r ep_no id title; do process_hist_entry & done <"$histfile")
+    history|prev)
+        if [ "$search" = "history" ]; then
+            anime_list=$(while read -r ep_no id title; do process_hist_entry & done <"$histfile")
+        else
+            anime_list=$(while read -r ep_no id title; do process_prev_entry & done <"$histfile")
+        fi
         wait
+
         [ -z "$anime_list" ] && die "No unwatched series in history!"
         [ -z "${index##*[!0-9]*}" ] && id=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: " | cut -f1)
         [ -z "${index##*[!0-9]*}" ] || id=$(printf "%s" "$anime_list" | sed -n "${index}p" | cut -f1)
