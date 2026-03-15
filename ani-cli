@@ -384,6 +384,89 @@ play() {
     [ "$player_function" != "debug" ] && [ "$player_function" != "download" ] && tput rc && tput ed
 }
 
+# anime syncing functions
+# myAnimeList ---
+MAL_CLIENT_ID="95d2b573d6de880ccb1771917327b51c"
+MAL_LOCAL_TOKEN="${XDG_CONFIG_HOME:-$HOME/.config}/myanicli/mal.json"
+
+mal_init(){
+    random_pkce=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 100)
+    oauth_url="https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=${MAL_CLIENT_ID}&code_challenge=${random_pkce}&code_challenge_method=plain"
+
+    printf "\033[1;34mconnect and sync to myAnimeList!"
+    printf "\n\033[1;35ma oauth page will open in your browser. authenticate, and come back here!"
+    printf "\n\033[1;35mif it didn't open automatically, click this link:"
+    printf "\n\n\033[1;36m$oauth_url"
+    
+    if command -v xdg-open >/dev/null; then xdg-open "$oauth_url" >/dev/null 2>&1 &
+    elif command -v open >/dev/null; then open "$oauth_url" >/dev/null 2>&1 &
+    elif command -v start >/dev/null; then start "$oauth_url" >/dev/null 2>&1 &
+    fi
+
+    if command -v nc >/dev/null 2>&1; then
+        printf "\n\n\033[1;30mnow listening on port 9996 for the oauth authorization..."
+        http_response="HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n
+        <html>
+        <body style='background:#121212;color:#00ff00;font-family:monospace;text-align:center;padding-top:20%;'>
+        <h2>successfully authenticated!</h2>
+        <p>the oauth authentication was successful! you can now safely return to your terminal.</p>
+        </body>
+        </html>\r\n"
+        
+        if nc -h 2>&1 | grep -q '/-p'; then
+            raw_request=$(printf "%b" "$http_response" | nc -l -p 9996 | grep -m 1 "code=")
+        else
+            raw_request=$(printf "%b" "$http_response" | nc -l 9996 | grep -m 1 "code=")
+        fi
+        auth_code=$(printf "%s" "$raw_request" | sed -n 's/.*code=\([^ &]*\).*/\1/p')
+    else
+        printf "\n\033[1;33mlooks like you don't have netcat installed! please, paste the localhost link you were redirected to here:"
+        printf "\n\033[1;33myes, the full string."
+        read -r redirect_url
+        auth_code=$(printf "%s" "$redirect_url" | sed -n 's/.*code=\([^&]*\).*/\1/p')
+    fi
+
+    if [ -z "$auth_code" ]; then
+        die "\n\033[1;31mcouldn't catch the oauth authorization! did you authenticate?"
+    fi
+
+    printf "\n\033[1;32mauthenticated! obtaining long-lived token from myAnimeList..."
+    response=$(curl -s -X POST "https://myanimelist.net/v1/oauth2/token" \
+        -d "client_id=${MAL_CLIENT_ID}" \
+        -d "code=${auth_code}" \
+        -d "code_verifier=${random_pkce}" \
+        -d "grant_type=authorization_code")
+
+    if printf "%s" "$response" | grep -q '"access_token"'; then
+        mkdir -p "$(dirname "$TOKEN_FILE")"
+        printf "%s" "$response" > "$MAL_LOCAL_TOKEN"
+        printf "\n\033[1;32msuccessfully saved token in your home directory!"
+        printf "\n\033[1;37myour animes will now automatically sync as you watch them!\n"
+        exit 0
+    else
+        die "\n\033[1;31man error occured while obtaining the token: $response\n"
+    fi
+}
+
+check_sync_status(){
+    # myAnimeList check status
+    if [ -f "$MAL_LOCAL_TOKEN" ]; then
+        access_token=$(grep -o '"access_token":"[^"]*"' "$MAL_LOCAL_TOKEN" | cut -d '"' -f4 )
+        user_response=$(curl -s -X GET "https://api.myanimelist.net/v2/users/@me" \
+            -H "Authorization: Bearer ${access_token}")
+
+        mal_username=$(printf "%s" "$user_response" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$mal_username" ]; then
+            printf "\033[1;35m[MAL]\033[0m logged in as \033[1;32m%s\033[0m!\n" "$mal_username"
+        else
+            printf "\033[1;35m[MAL]\033[0m session has expired! please sign back."
+        fi
+    fi
+
+    # aniList check status
+    # tbi
+}
+
 # MAIN
 
 # setup
@@ -449,6 +532,7 @@ while [ $# -gt 0 ]; do
             ;;
         -c | --continue) search=history ;;
         -R | --replay) search=prev ;;
+        --mal-login) mal_init ;;
         -d | --download)
             [ "$player_function" = "iSH" ] && iSH_DownFix="--async-dns=false"
             player_function=download
@@ -491,6 +575,7 @@ done
 [ "$use_external_menu" = "0" ] && multi_selection_flag="${ANI_CLI_MULTI_SELECTION:-"-m"}"
 [ "$use_external_menu" = "1" ] && multi_selection_flag="${ANI_CLI_MULTI_SELECTION:-"-multi-select"}"
 [ "$external_menu_normal_window" = "1" ] && external_menu_args="-normal-window"
+check_sync_status
 printf "\33[2K\r\033[1;34mChecking dependencies...\033[0m\n"
 dep_ch "curl" "sed" "grep" || true
 [ "$skip_intro" = 1 ] && (dep_ch "ani-skip" || true)
