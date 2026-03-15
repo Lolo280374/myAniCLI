@@ -1,6 +1,6 @@
 #!/bin/sh
 
-version_number="4.10.4"
+version_number="4.10.4-myanicli"
 
 # UI
 
@@ -388,6 +388,40 @@ play() {
 # myAnimeList ---
 MAL_CLIENT_ID="95d2b573d6de880ccb1771917327b51c"
 MAL_LOCAL_TOKEN="${XDG_CONFIG_HOME:-$HOME/.config}/myanicli/mal.json"
+SYNC_PREF_FILE="${XDG_CONFIG_HOME:-$HOME/.config}"/myanicli/sync_pref.txt
+
+sync_setup(){
+    tput clear
+    header_text="please select the provider you wish to use to sync your animes!
+you can re-run this prompt using the '--sync-setup' boot arg."
+    export FZF_DEFAULT_OPTS="--header='$header_text'"
+
+    choice=$(printf "myAnimeList\nAniList\nno sync (disabled)" | nth "welcome to myAniCLI!")
+    unset FZF_DEFAULT_OPTS
+
+    if [ -z "$choice" ]; then
+        die "setup has been cancelled! re-run the program to resume."
+    fi
+
+    mkdir -p "$(dirname "$SYNC_PREF_FILE")"
+    printf "%s" "$choice" > "$SYNC_PREF_FILE"
+    tput clear
+
+    case "$choice" in
+        "myAnimeList")
+            mal_init
+            ;;
+        "AniList")
+            printf "support for AniList is coming somewhat soon!\n"
+            ;;
+        "no sync (disabled)")
+            printf "sync has been disabled! you can always use the '--sync-setup' argument to set it up.\n"
+            ;;
+        *)
+            die "setup has been cancelled! re-run the program to resume."
+            ;;
+    esac
+}
 
 mal_init(){
     random_pkce=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 100)
@@ -427,7 +461,7 @@ mal_init(){
     fi
 
     if [ -z "$auth_code" ]; then
-        die "\n\033[1;31mcouldn't catch the oauth authorization! did you authenticate?"
+        die "couldn't catch the oauth authorization! did you authenticate?"
     fi
 
     printf "\n\033[1;32mauthenticated! obtaining long-lived token from myAnimeList..."
@@ -441,10 +475,59 @@ mal_init(){
         mkdir -p "$(dirname "$TOKEN_FILE")"
         printf "%s" "$response" > "$MAL_LOCAL_TOKEN"
         printf "\n\033[1;32msuccessfully saved token in your home directory!"
-        printf "\n\033[1;37myour animes will now automatically sync as you watch them!\n"
-        exit 0
+        printf "\n\033[1;37myour animes will now automatically sync as you watch them!\n\n"
     else
-        die "\n\033[1;31man error occured while obtaining the token: $response\n"
+        die "an error occured while obtaining the token: $response"
+    fi
+}
+
+mal_update(){
+
+    if [ ! -f "$SYNC_PREF_FILE" ] || [ "$(cat "$SYNC_PREF_FILE")" != "myAnimeList" ]; then
+        return
+    fi
+
+    if [ ! -f "$MAL_LOCAL_TOKEN" ]; then
+        return
+    fi
+
+    watch_status="watching"
+    access_token=$(grep -o '"access_token":"[^"]*"' "$MAL_LOCAL_TOKEN" | cut -d'"' -f4)
+    mal_search_title=$(printf "%s" "$title" | cut -d'(' -f1 | sed 's/[[:space:]]*$//')
+    search_resp=$(curl -s -G "https://api.myanimelist.net/v2/anime" \
+        --data-urlencode "q=${mal_search_title}" \
+        -d "limit=1" \
+        -d "fields=num_episodes" \
+        -H "Authorization: Bearer ${access_token}")
+
+    mal_id=$(printf "%s" "$search_resp" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
+    total_episodes=$(printf "%s" "$search_resp" | grep -o '"num_episodes":[0-9]*' | head -1 | cut -d':' -f2)
+    mal_official_title=$(printf "%s" "$search_resp" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [ -z "$mal_id" ]; then
+        printf "\n\033[1;35m[MAL]\033[33m '%s' couldn't be found on myAnimeList...\n" "$allanime_title"
+        return
+    fi
+
+    if [ -n "$total_episodes" ] && [ "$total_episodes" != "0" ]; then
+        if [ "$ep_no" = "$total_episodes" ]; then
+            watch_status="completed"
+        fi
+    fi
+
+    update_to_list_response=$(curl -s -X PATCH "https://api.myanimelist.net/v2/anime/${mal_id}/my_list_status" \
+    -H "Authorization: Bearer ${access_token}" \
+    -d "num_watched_episodes=${ep_no}" \
+    -d "status=${watch_status}")
+
+    if printf "%s" "$update_to_list_response" | grep -q '"status"'; then
+        if [ "$watch_status" = "completed" ]; then
+            printf "\n\033[1;35m[MAL]\033[0m updated '%s' as finished!\n" "$mal_official_title"
+        else
+            printf "\n\033[1;35m[MAL]\033[0m updated '%s' to episode %s!\n" "$mal_official_title" "$ep_no"
+        fi
+    else
+        printf "\n\033[1;35m[MAL]\033[31m an error occured while updating the list...\n"
     fi
 }
 
@@ -467,6 +550,7 @@ check_sync_status(){
     # tbi
 }
 
+# ---
 # MAIN
 
 # setup
@@ -532,7 +616,7 @@ while [ $# -gt 0 ]; do
             ;;
         -c | --continue) search=history ;;
         -R | --replay) search=prev ;;
-        --mal-login) mal_init ;;
+        --sync-setup) run_sync_wizard=1 ;;
         -d | --download)
             [ "$player_function" = "iSH" ] && iSH_DownFix="--async-dns=false"
             player_function=download
@@ -575,11 +659,21 @@ done
 [ "$use_external_menu" = "0" ] && multi_selection_flag="${ANI_CLI_MULTI_SELECTION:-"-m"}"
 [ "$use_external_menu" = "1" ] && multi_selection_flag="${ANI_CLI_MULTI_SELECTION:-"-multi-select"}"
 [ "$external_menu_normal_window" = "1" ] && external_menu_args="-normal-window"
-check_sync_status
 printf "\33[2K\r\033[1;34mChecking dependencies...\033[0m\n"
 dep_ch "curl" "sed" "grep" || true
 [ "$skip_intro" = 1 ] && (dep_ch "ani-skip" || true)
 dep_ch "fzf" || true
+
+# ---
+# checks if this is first time init => sync setup
+
+if [ "$run_sync_wizard" = "1" ] || [ ! -f "$SYNC_PREF_FILE" ]; then
+    sync_setup
+fi
+
+check_sync_status
+# ---
+
 case "$player_function" in
     debug) ;;
     download) dep_ch "ffmpeg" "aria2c" ;;
@@ -643,6 +737,7 @@ tput sc
 
 # playback & loop
 play
+mal_update
 [ "$player_function" = "download" ] || [ "$player_function" = "debug" ] && exit 0
 
 while cmd=$(printf "next\nreplay\nprevious\nselect\nchange_quality\nquit" | nth "Playing episode $ep_no of $title... "); do
