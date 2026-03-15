@@ -472,7 +472,7 @@ mal_init(){
         -d "grant_type=authorization_code")
 
     if printf "%s" "$response" | grep -q '"access_token"'; then
-        mkdir -p "$(dirname "$TOKEN_FILE")"
+        mkdir -p "$(dirname "$MAL_LOCAL_TOKEN")"
         printf "%s" "$response" > "$MAL_LOCAL_TOKEN"
         printf "\n\033[1;32msuccessfully saved token in your home directory!"
         printf "\n\033[1;37myour animes will now automatically sync as you watch them!\n\n"
@@ -482,7 +482,6 @@ mal_init(){
 }
 
 mal_update(){
-
     if [ ! -f "$SYNC_PREF_FILE" ] || [ "$(cat "$SYNC_PREF_FILE")" != "myAnimeList" ]; then
         return
     fi
@@ -531,18 +530,46 @@ mal_update(){
     fi
 }
 
+mal_refresh_auth(){
+    refresh_token=$(grep -o '"refresh_token":"[^"]*"' "$MAL_LOCAL_TOKEN" | cut -d'"' -f4)
+    if [ -z "$refresh_token" ]; then
+        return 1
+    fi
+
+    response=$(curl -s -X POST "https://myanimelist.net/v1/oauth2/token" \
+        -d "client_id=${MAL_CLIENT_ID}" \
+        -d "grant_type=refresh_token" \
+        -d "refresh_token=${refresh_token}")
+
+    if printf "%s" "$response" | grep -q '"access_token"'; then
+        printf "%s" "$response" > "$MAL_LOCAL_TOKEN"
+        return 0
+    else
+        return 1
+    fi
+}
+
 check_sync_status(){
     # myAnimeList check status
+
+    if [ ! -f "$SYNC_PREF_FILE" ] || [ "$(cat "$SYNC_PREF_FILE")" != "myAnimeList" ]; then
+        return
+    fi
+
     if [ -f "$MAL_LOCAL_TOKEN" ]; then
         access_token=$(grep -o '"access_token":"[^"]*"' "$MAL_LOCAL_TOKEN" | cut -d '"' -f4 )
         user_response=$(curl -s -X GET "https://api.myanimelist.net/v2/users/@me" \
             -H "Authorization: Bearer ${access_token}")
 
         mal_username=$(printf "%s" "$user_response" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
-        if [ -n "$mal_username" ]; then
-            printf "\033[1;35m[MAL]\033[0m logged in as \033[1;32m%s\033[0m!\n" "$mal_username"
+        if [ -z "$mal_username" ]; then
+            if mal_refresh_auth; then
+                check_sync_status
+            else
+                printf "\033[1;35m[MAL]\033[0m session has expired! please sign back."
+            fi
         else
-            printf "\033[1;35m[MAL]\033[0m session has expired! please sign back."
+            printf "\033[1;35m[MAL]\033[0m logged in as \033[1;32m%s\033[0m!\n" "$mal_username"
         fi
     fi
 
